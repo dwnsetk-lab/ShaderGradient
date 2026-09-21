@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Shader Gradient — 3 центра с переливами</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #050505; }
+    canvas { display: block; }
+    .hint {
+      position: fixed; top: 20px; left: 20px;
+      color: #fff; font-family: system-ui, sans-serif;
+      background: rgba(0,0,0,0.6); padding: 8px 14px; border-radius: 8px;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="hint">Двигай мышью — третий центр следует за курсором</div>
+  <canvas id="glCanvas"></canvas>
+
+  <script>
+    const canvas = document.getElementById('glCanvas');
+    const gl = canvas.getContext('webgl');
+    if (!gl) { alert('WebGL не поддерживается'); throw new Error('No WebGL'); }
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    const vsSource = `
+      attribute vec2 a_position;
+      void main() { gl_Position = vec4(a_position, 0.0, 1.0); }
+    `;
+
+    const fsSource = `
+      precision highp float;
+      uniform vec2  u_resolution;
+      uniform vec2  u_mouse;
+      uniform float u_time;
+
+      // HSV → RGB для плавных переливов
+      vec3 hsv2rgb(vec3 c) {
+        vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+        vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+        return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+      }
+
+      void main() {
+        vec2 st = gl_FragCoord.xy / u_resolution.xy;
+
+        // --- Три центра градиента ---
+        // Центр 1: летает по кругу
+        vec2 c1 = vec2(
+          0.5 + 0.25 * sin(u_time * 0.7),
+          0.5 + 0.20 * cos(u_time * 0.9)
+        );
+        // Центр 2: летает по другому кругу
+        vec2 c2 = vec2(
+          0.5 + 0.28 * cos(u_time * 0.5),
+          0.5 + 0.22 * sin(u_time * 0.6)
+        );
+        // Центр 3: следует за мышью
+        vec2 c3 = u_mouse / u_resolution.xy;
+
+        float d1 = distance(st, c1);
+        float d2 = distance(st, c2);
+        float d3 = distance(st, c3);
+
+        // Радиус затухания для каждого центра
+        float r1 = 0.35;
+        float r2 = 0.35;
+        float r3 = 0.40;
+
+        // Вес каждого центра (0..1) — плавное затухание от центра
+        float w1 = smoothstep(r1, 0.0, d1);
+        float w2 = smoothstep(r2, 0.0, d2);
+        float w3 = smoothstep(r3, 0.0, d3);
+
+        // Цвета центров — переливаются во времени через HSV
+        vec3 col1 = hsv2rgb(vec3(fract(u_time * 0.08),       0.9, 1.0));
+        vec3 col2 = hsv2rgb(vec3(fract(u_time * 0.08 + 0.33), 0.9, 1.0));
+        vec3 col3 = hsv2rgb(vec3(fract(u_time * 0.08 + 0.66), 0.9, 1.0));
+
+        // Смешиваем: каждый центр добавляет свой цвет пропорционально весу
+        float totalW = w1 + w2 + w3;
+        vec3 color = (col1 * w1 + col2 * w2 + col3 * w3) / max(totalW, 0.001);
+
+        // Если точка далеко от всех центров — плавно уходим в чёрный
+        color *= smoothstep(0.0, 0.15, totalW);
+
+        // Лёгкая пульсация яркости
+        color *= 0.85 + 0.15 * sin(u_time * 2.5);
+
+        gl_FragColor = vec4(color, 1.0);
+      }
+    `;
+
+    function createShader(gl, type, src) {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(s));
+      }
+      return s;
+    }
+
+    const program = gl.createProgram();
+    gl.attachShader(program, createShader(gl, gl.VERTEX_SHADER,   vsSource));
+    gl.attachShader(program, createShader(gl, gl.FRAGMENT_SHADER, fsSource));
+    gl.linkProgram(program);
+    gl.useProgram(program);
+
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -1,-1, 1,-1, -1,1,  -1,1, 1,-1, 1,1
+    ]), gl.STATIC_DRAW);
+
+    const aPos = gl.getAttribLocation(program, 'a_position');
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+    const uRes   = gl.getUniformLocation(program, 'u_resolution');
+    const uMouse = gl.getUniformLocation(program, 'u_mouse');
+    const uTime  = gl.getUniformLocation(program, 'u_time');
+
+    let mouseX = canvas.width / 2;
+    let mouseY = canvas.height / 2;
+
+    canvas.addEventListener('mousemove', e => {
+      mouseX = e.clientX;
+      mouseY = canvas.height - e.clientY;
+    });
+
+    canvas.addEventListener('touchmove', e => {
+      e.preventDefault();
+      const t = e.touches[0];
+      mouseX = t.clientX;
+      mouseY = canvas.height - t.clientY;
+    }, { passive: false });
+
+    let time = 0;
+    function render() {
+      time += 0.016;
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.uniform2f(uRes, canvas.width, canvas.height);
+      gl.uniform2f(uMouse, mouseX, mouseY);
+      gl.uniform1f(uTime, time);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      requestAnimationFrame(render);
+    }
+    render();
+  </script>
+</body>
+</html>
